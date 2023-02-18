@@ -26,13 +26,20 @@ void usage(FILE *fp, const char *self)
                 "  -c <command>  Run command by /bin/sh -c, whenever a client connected or connected to a server\n"
                 "  -l            Run as server(listening), otherwise run as a client(connecting)\n"
                 "  -d            Run as a daemon service\n"
-                "Note: If set -e and -c at the same time, only exec file, do not run command\n",
+                "Note: If set -e and -c at the same time, only exec file, do not run command.\n"
+                "      If use -l but no spec -e or -c, it will run as nc.\n",
                 self);
 }
 
-void *read_server(void *arg)
+struct read_server_arg {
+    int fd;
+    int peer_online;
+};
+
+void *read_service(void *arg)
 {
-    int fd = *((int *) arg);
+    struct read_server_arg *arg_t = (struct read_server_arg *) arg;
+    int fd = arg_t->fd;
     char buff[READ_BUFF_SIZE];
     ssize_t n;
     while ((n = read(fd, buff, READ_BUFF_SIZE - 1)) > 0) {
@@ -40,6 +47,7 @@ void *read_server(void *arg)
         fprintf(stdout, "%s", buff);
         fflush(stdout);
     }
+    arg_t->peer_online = 0;
     return NULL;
 }
 
@@ -54,6 +62,7 @@ int main(int argc, char *argv[])
     size_t len = 0;
     ssize_t read_c;
     pthread_t thread;
+    struct read_server_arg read_server_arg_t;
 
     // 解析参数
     while ((opt = getopt(argc, argv, "ha:U:p:e:c:ld")) != -1) {
@@ -148,8 +157,14 @@ int main(int argc, char *argv[])
             }
             wait(NULL);
         }
-        pthread_create(&thread, NULL, read_server, (void *) &serv_fd);
+        read_server_arg_t.fd = serv_fd;
+        read_server_arg_t.peer_online = 1;
+        pthread_create(&thread, NULL, read_service, (void *) &read_server_arg_t);
         while ((read_c = getline(&line, &len, stdin)) != -1) {
+            if (read_server_arg_t.peer_online == 0) {
+                fprintf(stderr, "peer has performed an orderly shutdown.\n");
+                break;
+            }
             write(serv_fd, line, strlen(line));
         }
         free(line);
@@ -186,6 +201,27 @@ int main(int argc, char *argv[])
         if (cli_fd == -1) {
             perror("accept");
             continue;
+        }
+
+        if (!exec_file && !run_command) {
+            // 没有指定处理客户端连接的子程序，将像nc一样，直接在标准输入和标准输出与客户端交互
+            // 由于标准输入和标准输出只有一个，所以以这种方式启动服务，将只能支持单用户连接
+
+            read_server_arg_t.fd = cli_fd;
+            read_server_arg_t.peer_online = 1;
+            pthread_create(&thread, NULL, read_service, (void *) &read_server_arg_t);
+            while ((read_c = getline(&line, &len, stdin)) != -1) {
+                if (read_server_arg_t.peer_online == 0) {
+                    fprintf(stderr, "peer has performed an orderly shutdown.\n");
+                    break;
+                }
+                write(cli_fd, line, strlen(line));
+            }
+            free(line);
+
+            // 当连接断开将直接结束while
+            close(cli_fd);
+            break;
         }
 
         // 创建子进程执行程序
