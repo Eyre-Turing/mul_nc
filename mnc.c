@@ -94,7 +94,7 @@ int main(int argc, char *argv[])
     }
 
     if (as_service) {
-        daemon(0, 0);
+        daemon(1, 0);   // 不要切换当前目录到根目录，要不然很容易在调用命令时由于路径问题坑人
     }
 
     // 创建套接字
@@ -195,7 +195,7 @@ int main(int argc, char *argv[])
             continue;
         }
         if (pid == 0) {
-            daemon(0, 1);
+            // daemon(0, 1);    // 这个操作不要做，要不然会导致守护进程过多，会产生太多垃圾进程需要手动清理
             dup2(cli_fd, STDIN_FILENO);
             dup2(cli_fd, STDOUT_FILENO);
             // dup2(cli_fd, STDERR_FILENO);     // 这个操作不要做，要不然当调用脚本时有调试也会被重定向，服务后期会死得很惨
