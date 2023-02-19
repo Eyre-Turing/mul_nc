@@ -14,21 +14,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define LISTEN_BACKLOG  50
+#define LISTEN_BACKLOG  25
 #define READ_BUFF_SIZE  1024
 
 void usage(FILE *fp, const char *self)
 {
     fprintf(fp, "Usage: %s [-Uld] [-a <addr>] [-p <port>] [-e <file>] [-c <command>]\n"
-                "  -a <addr>     Address. If set -U, please spec unix socket file path\n"
+                "  -a <addr>     Address. If set -U, please specify unix socket file path\n"
                 "  -U            Use unix socket\n"
                 "  -p <port>     Port\n"
                 "  -e <file>     Exec file, whenever a client connected or connected to a server\n"
                 "  -c <command>  Run command by /bin/sh -c, whenever a client connected or connected to a server\n"
                 "  -l            Run as server(listening), otherwise run as a client(connecting)\n"
                 "  -d            Run as a daemon service\n"
+                "  -k            Accept multiple connections in listen mode\n"
                 "Note: If set -e and -c at the same time, only exec file, do not run command.\n"
-                "      If use -l but no spec -e or -c, it will run as nc.\n",
+                "      If use -l but no specify -e or -c, it will run as nc.\n",
                 self);
 }
 
@@ -54,7 +55,7 @@ void *read_service(void *arg)
 
 int main(int argc, char *argv[])
 {
-    int serv_fd, cli_fd, opt, port = 0, as_listening = 0, as_service = 0, use_unix_socket = 0, s;
+    int serv_fd, cli_fd, opt, port = 0, as_listening = 0, as_service = 0, use_unix_socket = 0, keep_open = 0, s;
     char *tag_host = NULL, *port_str = NULL, *exec_file = NULL, *run_command = NULL, *line = NULL;
     struct sockaddr *my_addr = NULL, *peer_addr = NULL;
     struct sockaddr_in my_addr_in, peer_addr_in;
@@ -68,7 +69,7 @@ int main(int argc, char *argv[])
     struct read_server_arg read_server_arg_t;
 
     // 解析参数
-    while ((opt = getopt(argc, argv, "ha:Up:e:c:ld")) != -1) {
+    while ((opt = getopt(argc, argv, "ha:Up:e:c:ldk")) != -1) {
         switch (opt) {
         case 'h':
             usage(stdout, argv[0]);
@@ -99,6 +100,9 @@ int main(int argc, char *argv[])
         case 'd':
             as_service = 1;
             break;
+        case 'k':
+            keep_open = 1;
+            break;
         default:
             usage(stderr, argv[0]);
             return 1;
@@ -122,7 +126,7 @@ int main(int argc, char *argv[])
 
     if (!as_listening) {    // 如果作为客户端运行
         if (!tag_host) {
-            fprintf(stderr, "you have to spec host address.\n");
+            fprintf(stderr, "you have to specify host address.\n");
             close(serv_fd);
             return 1;
         }
@@ -199,7 +203,7 @@ int main(int argc, char *argv[])
     // 绑定端口
     if (use_unix_socket) {
         if (!tag_host) {
-            fprintf(stderr, "you have to spec unix socket file path.\n");
+            fprintf(stderr, "you have to specify unix socket file path.\n");
             close(serv_fd);
             return 1;
         }
@@ -218,6 +222,11 @@ int main(int argc, char *argv[])
         my_addr = (struct sockaddr *) &my_addr_in;
         my_addr_size = sizeof(my_addr_in);
     }
+
+    // TIME_WAIT状态下允许其他进程绑定和该进程一样的socket端口
+    s = 1;
+    setsockopt(serv_fd, SOL_SOCKET, SO_REUSEADDR,  &s, sizeof(s));
+
     if (bind(serv_fd, my_addr, my_addr_size) == -1) {
         perror("bind");
         close(serv_fd);
@@ -234,7 +243,7 @@ int main(int argc, char *argv[])
     signal(SIGCHLD, SIG_IGN);   // 防止产生僵尸进程
 
     // 开始循环
-    while (1) {
+    while (serv_fd >= 0) {
         // 等待连接
         if (use_unix_socket) {
             peer_addr = (struct sockaddr *) &peer_addr_un;
@@ -247,6 +256,11 @@ int main(int argc, char *argv[])
         if (cli_fd == -1) {
             perror("accept");
             continue;
+        }
+
+        if (!keep_open) {
+            close(serv_fd);
+            serv_fd = -1;
         }
 
         if (!exec_file && !run_command) {
@@ -264,10 +278,11 @@ int main(int argc, char *argv[])
                 write(cli_fd, line, strlen(line));
             }
             free(line);
+            line = NULL;
 
             // 当连接断开将直接结束while
             close(cli_fd);
-            break;
+            continue;
         }
 
         // 创建子进程执行程序
@@ -290,6 +305,8 @@ int main(int argc, char *argv[])
         }
         close(cli_fd);
     }
-    close(serv_fd);
+    if (serv_fd >= 0) {
+        close(serv_fd);
+    }
     return 0;
 }
